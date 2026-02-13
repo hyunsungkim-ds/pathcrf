@@ -7,7 +7,7 @@
 Source code for the paper **PathCRF: Ball-Free Sports Event Detection via Possession Path Inference from Player Trajectories**.
 
 ## Introduction
-- A framework for detecting on-ball events solely from player trajectories in soccer.
+**PathCRF** is a framework for detecting on-ball events solely from player trajectories in soccer. It models player trajectories as a fully connected dynamic graph and formulate event detection as the problem of selecting exactly one edge corresponding to the current possession state at each time step. It encodes dynamic interactions between players over time via a Set Attention-based backbone, and employs a Conditional Random Field (CRF) to ensure logical consistency of the resulting edge sequence.
 <p align="center">
   <img src="docs/overview.png" />
 </p>
