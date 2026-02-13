@@ -1,6 +1,6 @@
 # Experimental data and code files
 data/
-saved/
+# saved/
 animations/
 private/
 *.zip
@@ -229,4 +229,3 @@ documents/
 
 # prompt
 implementation_plan.md
-docs/
