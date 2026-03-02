@@ -460,7 +460,7 @@ class Animator:
             ax.set_xticks([])
             ax.set_yticks([])
             ax.set_axis_off()
-            fig.set_tight_layout(True)
+            fig.subplots_adjust(left=0.02, right=0.92, bottom=0.05, top=0.95)
         else:
             if self.events is not None:
                 fig = plt.figure(figsize=(10 * 1.35, 5.2))
@@ -683,7 +683,7 @@ class Animator:
                         Animator.animate_events(t, *event_state)
                     if "annot_x" in main_tracking.columns:
                         Animator.animate_events(t, *annot_state)
-            
+
             if self.text_cols is not None:
                 for col in self.text_cols:
                     text_dict[col].set_text(str(str_dict[col][t]))
@@ -696,31 +696,32 @@ class Animator:
                     raw_fid = main_tracking.iloc[t].get("frame_id")
                     if pd.notna(raw_fid):
                         curr_fid = int(raw_fid)
-                        
+
                         if curr_fid in events_by_frame:
                             for _, ev in events_by_frame[curr_fid].iterrows():
                                 # Use duration if provided (frames until next event), else default 50 frames (2s)
                                 duration = int(ev.get("duration", 50))
                                 expire_t = t + duration
-                                
+
                                 # 1. Arrows (for Passes)
                                 if ev.get("show_arrow", False):
                                     start = (ev.get("x", 0), ev.get("y", 0))
                                     end = (ev.get("end_x", 0), ev.get("end_y", 0))
                                     color = ev.get("arrow_color", "red")
-                                    
+
                                     arr = patches.FancyArrowPatch(
-                                        start, end,
+                                        start,
+                                        end,
                                         arrowstyle="Simple,head_length=5,head_width=5,tail_width=1",
                                         color=color,
                                         zorder=200,
-                                        mutation_scale=8
+                                        mutation_scale=8,
                                     )
                                     ax.add_patch(arr)
                                     active_arrows.append((arr, expire_t))
                 except Exception:
                     pass
-            
+
             # Clean up arrows/circles
             for i in range(len(active_arrows) - 1, -1, -1):
                 patch_obj, expire_t = active_arrows[i]
