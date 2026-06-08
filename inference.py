@@ -1,4 +1,5 @@
 import re
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,7 +12,6 @@ from tqdm import tqdm
 from datatools import config, postprocess, utils
 from models.dynamic_dense_crf import DynamicDenseCRF
 from models.dynamic_sparse_crf import DynamicSparseCRF
-from models.edge_embed_crf import EdgeEmbedCRF
 from models.set_lstm import SetLSTM
 from models.static_dense_crf import StaticDenseCRF
 from models.static_sparse_crf import StaticSparseCRF
@@ -365,6 +365,7 @@ def inference_episode(
     ep_tracking: pd.DataFrame,
     left_gk: str = None,
     right_gk: str = None,
+    ball_feature: bool = False,
     use_crf: bool = True,
     decode: str = "indep",
     last_node: Optional[str] = None,
@@ -398,7 +399,8 @@ def inference_episode(
     node_order = left_players + right_players + outside_nodes
 
     feat_dim = getattr(model, "feat_dim", None) or getattr(model, "node_in_dim", None) or 8
-    feat_types = ["_x", "_y", "_vx", "_vy", "_speed", "_accel"][: max(feat_dim - 2, 0)]
+    n_player_feats = feat_dim - 2 - (2 if ball_feature else 0)
+    feat_types = ["_x", "_y", "_vx", "_vy", "_speed", "_accel"][:n_player_feats]
     input_cols = [f"{p}{ft}" for p in node_order for ft in feat_types]
 
     if input_cols and ep_tracking[input_cols].isna().any().any():
@@ -410,6 +412,11 @@ def inference_episode(
     ep_indicators = np.broadcast_to(indicators[None, :, :], (len(ep_tracking), n_nodes, 2))
     ep_features = ep_tracking[input_cols].to_numpy(dtype=np.float32).reshape(len(ep_tracking), n_nodes, -1)
     ep_input = np.concatenate([ep_indicators, ep_features], axis=-1)
+
+    if ball_feature:
+        ep_ball = ep_tracking[["ball_x", "ball_y"]].to_numpy(dtype=np.float32)
+        ball_broadcast = np.broadcast_to(ep_ball[:, None, :], (len(ep_tracking), n_nodes, 2))
+        ep_input = np.concatenate([ep_input, ball_broadcast], axis=-1)
 
     down_idx = np.arange(0, len(ep_tracking), sample_freq, dtype=int)
     if len(down_idx) == 0 or down_idx[-1] != len(ep_tracking) - 1:
@@ -496,7 +503,7 @@ def inference_episode(
                         win_micro_dev = win_micro.to(device)
                         emissions = win_micro_dev.index_select(dim=1, index=valid_edge_ids_window).unsqueeze(0)
 
-                        if isinstance(model.crf, (EdgeEmbedCRF, DynamicDenseCRF, DynamicSparseCRF)):
+                        if isinstance(model.crf, (DynamicDenseCRF, DynamicSparseCRF)):
                             if win_edge is None:
                                 raise ValueError("CRF edge embeddings are missing for dynamic CRF.")
                             win_edge_dev = win_edge.to(device)
@@ -779,6 +786,7 @@ def inference_episode(
 def inference(
     model: SetLSTM,
     tracking: pd.DataFrame,
+    ball_feature: bool = False,
     use_crf: bool = True,
     decode: str = "indep",  # choices: [indep, greedy, viterbi]
     correct_episode_lasts: bool = False,
@@ -786,6 +794,7 @@ def inference(
     window_seconds: Optional[float] = None,
     fps: float = 25.0,
     sample_freq: int = 5,
+    skip_red_phases: bool = False,
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], pd.DataFrame, dict]:
     """
     Downsample to (fps / sample_freq), run the model, then upsample to original fps.
@@ -816,7 +825,7 @@ def inference(
     if "episode_id" not in tracking.columns or "frame_id" not in tracking.columns:
         tracking, _ = utils.label_frames_and_episodes(tracking, fps=fps)
     if "phase_id" not in tracking.columns:
-        tracking = utils.label_phases(tracking)
+        tracking, _ = utils.label_phases(tracking)
 
     tracking = tracking.set_index("frame_id").sort_index()
     tracking = _add_outside_nodes(tracking)
@@ -848,6 +857,9 @@ def inference(
     window_count = 0
     forbid_trans = 0.0
     total_trans = 0
+    ep_latencies = []
+    ep_durations = []
+    start_time = time.time()
 
     for phase in sorted(tracking["phase_id"].unique(), reverse=True):
         phase_tracking = tracking[tracking["phase_id"] == phase]
@@ -856,17 +868,28 @@ def inference(
 
         left_gk, right_gk = utils.detect_keepers(phase_tracking, left_first=True)
 
+        if skip_red_phases:
+            valid_cols = phase_tracking.dropna(axis=1, how="all").columns
+            left_team, right_team = left_gk.split("_")[0], right_gk.split("_")[0]
+            n_left = len({c[:-2] for c in valid_cols if re.match(rf"{left_team}_.*_x", c)})
+            n_right = len({c[:-2] for c in valid_cols if re.match(rf"{right_team}_.*_x", c)})
+            team_size = getattr(model, "team_size", 11)
+            if n_left != team_size or n_right != team_size:
+                continue
+
         episodes = sorted([e for e in phase_tracking["episode_id"].unique() if e > 0], reverse=True)
         next_ep_event = None
 
         for episode in tqdm(episodes, desc=f"Phase {phase}"):
             ep_tracking: pd.DataFrame = phase_tracking[phase_tracking["episode_id"] == episode].sort_index()
             last_node = _find_last_node_from_next_event(next_ep_event) if correct_episode_lasts else None
+            ep_start = time.time()
             macro_prev_full, macro_next_full, micro_full, _, ep_stats = inference_episode(
                 model=model,
                 ep_tracking=ep_tracking,
                 left_gk=left_gk,
                 right_gk=right_gk,
+                ball_feature=ball_feature,
                 use_crf=use_crf,
                 decode=decode,
                 last_node=last_node,
@@ -876,6 +899,8 @@ def inference(
                 sample_freq=sample_freq,
                 device=device,
             )
+            ep_latencies.append(time.time() - ep_start)
+            ep_durations.append(len(ep_tracking))
 
             if macro_prev_full is not None and macro_prev_df is not None:
                 missing_cols = [c for c in macro_prev_full.columns if c not in macro_prev_df.columns]
@@ -944,5 +969,9 @@ def inference(
             stats["pos_error"] = round(sum_pos_error / stats["n_frames"], 4)
     if evaluate and window_seconds is not None and window_count > 0:
         stats["edge_acc_window"] = round(window_acc_sum / window_count, 4)
+
+    stats["inference_time"] = round(time.time() - start_time, 4)
+    stats["ep_latencies"] = ep_latencies
+    stats["ep_durations"] = ep_durations
 
     return macro_prev_df, macro_next_df, micro_pred_df, stats

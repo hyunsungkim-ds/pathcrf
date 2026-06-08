@@ -39,6 +39,7 @@ class SoccerWindowDataset(Dataset):
         sample_freq: int = 5,
         window_seconds: float = 10.0,
         window_stride: int = 1,
+        ball_feature: bool = False,
         self_loops: bool = True,
         flip_pitch: bool = False,
         verbose: bool = True,
@@ -51,11 +52,13 @@ class SoccerWindowDataset(Dataset):
         self.sample_freq = sample_freq
         self.window_size = int(round(window_seconds * fps / sample_freq))
         self.window_stride = int(window_stride)
+        self.ball_feature = ball_feature
         self.self_loops = self_loops
         self.flip_pitch = flip_pitch
 
         self.feature_types = ["_x", "_y", "_vx", "_vy", "_speed", "_accel"]
-        used_feature_types = self.feature_types[: node_in_dim - 2]  # Two node indicators will be attached later
+        n_player_feats = node_in_dim - 2 - (2 if ball_feature else 0)
+        used_feature_types = self.feature_types[:n_player_feats]
         self.used_feature_types = used_feature_types
 
         # Offsets for positional/velocity features inside node feature vectors
@@ -63,6 +66,14 @@ class SoccerWindowDataset(Dataset):
         self._idx_y = 2 + used_feature_types.index("_y") if "_y" in used_feature_types else None
         self._idx_vx = 2 + used_feature_types.index("_vx") if "_vx" in used_feature_types else None
         self._idx_vy = 2 + used_feature_types.index("_vy") if "_vy" in used_feature_types else None
+
+        # Ball feature offsets (appended after player features)
+        if ball_feature:
+            self._idx_ball_x = 2 + n_player_feats
+            self._idx_ball_y = 2 + n_player_feats + 1
+        else:
+            self._idx_ball_x = None
+            self._idx_ball_y = None
 
         self.outside_nodes = {
             "out_left": (0, config.PITCH_Y / 2),
@@ -77,7 +88,7 @@ class SoccerWindowDataset(Dataset):
 
         for f in tqdm(self.data_paths, desc="Building window samples", disable=not verbose):
             tracking = pd.read_parquet(f)
-            phases = utils.summarize_phases(tracking)
+            tracking, phases = utils.label_phases(tracking)
 
             for k, xy in self.outside_nodes.items():
                 tracking[f"{k}_x"] = xy[0]
@@ -118,10 +129,29 @@ class SoccerWindowDataset(Dataset):
                     if episode == 0 or len(ep_tracking) < window_seconds * fps:
                         continue
 
+                    # Skip episodes where a possessing player has NaN position data
+                    poss_players = ep_tracking["player_id"].dropna()
+                    poss_players = poss_players[~poss_players.str.startswith(("out_", "goal_"))]
+                    skip = False
+                    for pid in poss_players.unique():
+                        if ep_tracking[f"{pid}_x"].isna().any():
+                            skip = True
+                            break
+                    if skip:
+                        continue
+
+                    # Skip episodes where any node feature contains NaN
+                    if ep_tracking[node_cols].isna().any().any():
+                        continue
+
                     ep_node_indicators = np.broadcast_to(node_indicators[None, :, :], (len(ep_tracking), n_nodes, 2))
                     ep_features = ep_tracking[node_cols].values.reshape(len(ep_tracking), n_nodes, -1)
                     ep_features = np.concatenate([ep_node_indicators, ep_features], axis=-1)  # (T_ep, N, F)
                     ep_ball = ep_tracking[["ball_x", "ball_y"]].to_numpy(dtype=np.float32)  # (T_ep, 2)
+
+                    if self.ball_feature:
+                        ball_broadcast = np.broadcast_to(ep_ball[:, None, :], (len(ep_tracking), n_nodes, 2))
+                        ep_features = np.concatenate([ep_features, ball_broadcast], axis=-1)
 
                     if ep_tracking["player_id"].dropna().empty:
                         # Skip episodes where player_id is missing for the entire clip
@@ -260,12 +290,16 @@ class SoccerWindowGraphs(SoccerWindowDataset):
             input_np[:, :, self._idx_x] = config.PITCH_X - input_np[:, :, self._idx_x]
             if self._idx_vx is not None:
                 input_np[:, :, self._idx_vx] = -input_np[:, :, self._idx_vx]
+            if self._idx_ball_x is not None:
+                input_np[:, :, self._idx_ball_x] = config.PITCH_X - input_np[:, :, self._idx_ball_x]
             ball_np[:, 0] = config.PITCH_X - ball_np[:, 0]
 
         if flip_y and self._idx_y is not None:
             input_np[:, :, self._idx_y] = config.PITCH_Y - input_np[:, :, self._idx_y]
             if self._idx_vy is not None:
                 input_np[:, :, self._idx_vy] = -input_np[:, :, self._idx_vy]
+            if self._idx_ball_y is not None:
+                input_np[:, :, self._idx_ball_y] = config.PITCH_Y - input_np[:, :, self._idx_ball_y]
             ball_np[:, 1] = config.PITCH_Y - ball_np[:, 1]
 
         return input_np, ball_np
@@ -393,6 +427,8 @@ class SoccerWindowTensors(SoccerWindowDataset):
                 input_np[:, :, self._idx_x] = config.PITCH_X - input_np[:, :, self._idx_x]
             if self._idx_vx is not None:
                 input_np[:, :, self._idx_vx] = -input_np[:, :, self._idx_vx]
+            if self._idx_ball_x is not None:
+                input_np[:, :, self._idx_ball_x] = config.PITCH_X - input_np[:, :, self._idx_ball_x]
 
             left_block = input_np[:, : self.team_size, :]
             right_block = input_np[:, self.team_size : self.team_size * 2, :]
@@ -432,6 +468,8 @@ class SoccerWindowTensors(SoccerWindowDataset):
                 input_np[:, :, self._idx_y] = config.PITCH_Y - input_np[:, :, self._idx_y]
             if self._idx_vy is not None:
                 input_np[:, :, self._idx_vy] = -input_np[:, :, self._idx_vy]
+            if self._idx_ball_y is not None:
+                input_np[:, :, self._idx_ball_y] = config.PITCH_Y - input_np[:, :, self._idx_ball_y]
 
             if poss_np is not None:
                 poss_player = poss_np[:, :2]
@@ -444,3 +482,50 @@ class SoccerWindowTensors(SoccerWindowDataset):
                 poss_np[:, :2] = out_lr + out_b_to_t + out_t_to_b
 
         return input_np, poss_np, ball_np, player_mask_np
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Build SoccerWindowTensors datasets")
+    parser.add_argument("--source", type=str, default="sportec", choices=["kleague", "sportec"])
+    parser.add_argument("--n_train", type=int, required=True, help="Number of matches for training")
+    parser.add_argument("--n_val", type=int, required=True, help="Number of matches for validation")
+    parser.add_argument("--target_fps", type=float, default=5.0, help="Target FPS after downsampling")
+    parser.add_argument("--seed", type=int, default=128)
+    parser.add_argument("--flip_pitch", action="store_true")
+    args = parser.parse_args()
+
+    SOURCE_FPS = {"kleague": 10.0, "sportec": 25.0}
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / f"data/{args.source}/tracking_processed"
+    output_dir = base_dir / "data/datasets"
+    os.makedirs(output_dir, exist_ok=True)
+
+    all_files = sorted(str(f) for f in data_dir.glob("*.parquet"))
+    n_total = args.n_train + args.n_val
+    assert len(all_files) >= n_total, f"Need {n_total} files but found {len(all_files)}"
+
+    train_paths = all_files[: args.n_train]
+    val_paths = all_files[args.n_train : n_total]
+
+    print(f"Train: {len(train_paths)} matches, Val: {len(val_paths)} matches")
+
+    src_fps = SOURCE_FPS[args.source]
+    dataset_kwargs = dict(fps=src_fps, sample_freq=int(src_fps / args.target_fps), flip_pitch=args.flip_pitch)
+
+    print("Building training dataset...")
+    train_dataset = SoccerWindowTensors(train_paths, **dataset_kwargs)
+    torch.save(train_dataset, output_dir / f"{args.source}_train.pt")
+    print(f"  Saved {len(train_dataset)} samples in {output_dir / f'{args.source}_train.pt'}")
+
+    print("Building validation dataset...")
+    val_dataset = SoccerWindowTensors(val_paths, **dataset_kwargs)
+    torch.save(val_dataset, output_dir / f"{args.source}_val.pt")
+    print(f"  Saved {len(val_dataset)} samples in {output_dir / f'{args.source}_val.pt'}")

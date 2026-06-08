@@ -4,78 +4,16 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from datatools import config, shot_detection, utils
-
-SIMPLE_TYPES = ["kick", "control", "out"]
-SHOT_TYPES = ["shot", "shot_block"]
-OUTGOING_TYPES = config.PASS_LIKE_OPEN + config.SET_PIECE + ["tackle", "bad_touch", "dispossessed", "kick"]
-INCOMING_TYPES = config.INCOMING
+from datatools import config, postprocess
 
 DEFAULT_SCORING = {
     "time_weight": 25.0,
     "dist_weight": 25.0,
     "player_weight": 25.0,
     "type_match_weight": 25.0,
-    "shot_pass_weight": 20.0,
     "max_td": 3.0,
     "max_dist": 25.0,
 }
-
-
-def relabel_events(events: pd.DataFrame, drop_fouls: bool = True, keep_shots: bool = False) -> pd.DataFrame:
-    """
-    Reclassify events into pass/control/out using the next event in the same episode.
-
-    Rules:
-    - If event_type is "out" -> "out"
-    - Else if next event is performed by the same player -> "control"
-    - Else if next event is performed by another player -> "kick"
-    Events without a next event (and not "out") are dropped.
-    """
-    events = events.copy()
-    if drop_fouls:
-        events = events[events["event_type"] != "foul"].copy()
-
-    if "start_x" in events.columns:
-        events = events.rename(columns={"start_x": "x", "start_y": "y"}).copy()
-
-    events["seconds"] = events["timestamp"].apply(utils.timestamp_to_seconds)
-    events = events.sort_values("frame_id", ignore_index=True, kind="stable")
-
-    next_player_ids = events.groupby("episode_id")["player_id"].shift(-1)
-
-    # Auto-detect shots if requested and no labels exist
-    # (Note: relabel_events renames start_x to x, so we rely on caller or check both)
-    # But optimal place for detection is BEFORE renaming.
-    # Here we assume detection already happened IF columns exist.
-    # If not, shot_mask will be empty unless it's GT.
-
-    shot_mask = events["event_type"].isin(SHOT_TYPES) if keep_shots else pd.Series(False, index=events.index)
-    if keep_shots and "is_pred_shot_union" in events.columns:
-        shot_mask = shot_mask | events["is_pred_shot_union"].astype(bool)
-
-    simple_types = pd.Series(index=events.index, dtype=object)
-    simple_types[events["event_type"] == "out"] = "out"
-
-    non_out_mask = events["event_type"] != "out"
-    same_player = events["player_id"] == next_player_ids
-    simple_types[non_out_mask & same_player] = "control"
-    simple_types[non_out_mask & ~same_player & next_player_ids.notna()] = "kick"
-
-    last_mask = non_out_mask & next_player_ids.isna()
-    simple_types[last_mask & events["event_type"].isna()] = "kick"
-    simple_types[last_mask & events["event_type"].isin(OUTGOING_TYPES)] = "kick"
-    simple_types[last_mask & events["event_type"].isin(INCOMING_TYPES)] = "control"
-
-    if keep_shots:
-        simple_types[shot_mask] = "shot"
-
-    events["event_type"] = simple_types
-    if keep_shots:
-        events = events[events["event_type"].isin(SIMPLE_TYPES + SHOT_TYPES)].copy()
-    else:
-        events = events[events["event_type"].isin(SIMPLE_TYPES)].copy()
-    return events
 
 
 def _pair_score(true_event: pd.Series, pred_event: pd.Series, scoring: dict | None = None) -> float:
@@ -92,21 +30,16 @@ def _pair_score(true_event: pd.Series, pred_event: pd.Series, scoring: dict | No
         if td >= max_td:
             time_score = 0.0
 
-    dist = ((true_event["x"] - pred_event["x"]) ** 2 + (true_event["y"] - pred_event["y"]) ** 2) ** 0.5
+    dist_x = true_event["start_x"] - pred_event["start_x"]
+    dist_y = true_event["start_y"] - pred_event["start_y"]
+    dist = (dist_x**2 + dist_y**2) ** 0.5
     xy_score = cfg["dist_weight"] * (1.0 - min(dist, max_dist) / max_dist)
 
     player_score = cfg["player_weight"] if true_event["player_id"] == pred_event["player_id"] else 0.0
 
     true_type = true_event["event_type"]
     pred_type = pred_event["event_type"]
-    shot_pass_bridge = (true_type == "shot" and pred_type == "pass") or (pred_type == "shot" and true_type == "pass")
-
-    if true_type == pred_type:
-        type_score = cfg["type_match_weight"]
-    elif shot_pass_bridge:
-        type_score = cfg["shot_pass_weight"]
-    else:
-        type_score = 0.0
+    type_score = cfg["type_match_weight"] if true_type == pred_type else 0.0
     return time_score + xy_score + player_score + type_score
 
 
@@ -190,10 +123,10 @@ def add_alignment_details(
     result["_pred_receiver_id"] = result["pred_index"].map(pred_events["receiver_id"])
     result["_true_event_type"] = result["true_index"].map(true_events["event_type"])
     result["_pred_event_type"] = result["pred_index"].map(pred_events["event_type"])
-    result["_true_x"] = result["true_index"].map(true_events["x"])
-    result["_true_y"] = result["true_index"].map(true_events["y"])
-    result["_pred_x"] = result["pred_index"].map(pred_events["x"])
-    result["_pred_y"] = result["pred_index"].map(pred_events["y"])
+    result["_true_x"] = result["true_index"].map(true_events["start_x"])
+    result["_true_y"] = result["true_index"].map(true_events["start_y"])
+    result["_pred_x"] = result["pred_index"].map(pred_events["start_x"])
+    result["_pred_y"] = result["pred_index"].map(pred_events["start_y"])
 
     result["frame_diff"] = (result["_true_frame_id"] - result["_pred_frame_id"]).abs()
     result["same_player"] = result["_true_player_id"] == result["_pred_player_id"]
@@ -213,23 +146,14 @@ def align_true_and_pred(
     true_events: pd.DataFrame,
     pred_events: pd.DataFrame,
     threshold: float = 1.0,
-    keep_shots: bool = False,
     gap_penalty: float = -10.0,
     scoring_config: dict | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
-    # Auto-detect shots on Prediction data if needed
-    if keep_shots and "is_pred_shot_union" not in pred_events.columns:
-        # Check if we have necessary columns for detection
-        required = ["start_x", "start_y", "player_id"]
-        if all(col in pred_events.columns for col in required):
-            print("  [evaluate_events] Auto-detecting shots in prediction data...")
-            pred_events = shot_detection.detect_shots(pred_events)
+    true_events = postprocess.simplify_events(true_events, drop_fouls=True)
+    pred_events = postprocess.simplify_events(pred_events, drop_fouls=False)
 
-    true_events = relabel_events(true_events, drop_fouls=True, keep_shots=keep_shots)
-    pred_events = relabel_events(pred_events, drop_fouls=False, keep_shots=keep_shots)
-
-    event_types = SIMPLE_TYPES + SHOT_TYPES if keep_shots else SIMPLE_TYPES
+    event_types = config.SIMPLE_TYPES
     type_stats = {t: {"true_count": 0, "pred_count": 0, "matched": 0} for t in event_types}
     true_counts = true_events["event_type"].value_counts()
     pred_counts = pred_events["event_type"].value_counts()

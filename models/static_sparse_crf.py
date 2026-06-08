@@ -7,8 +7,8 @@ import torch.nn as nn
 class StaticSparseCRF(nn.Module):
     """
     Sparse CRF over K edge-states with static transition parameters.
-    Uses the same allowed-transition rules as EdgeEmbedCRF/TiedCRF, but
-    learns a free parameter for each allowed (prev, curr) pair.
+    Uses the same allowed-transition rules as DynamicSparseCRF,
+    but learns a free parameter for each allowed (prev, curr) pair.
 
     emissions: (B, T, K)
     tags: (B, T) compressed edge-state IDs in [0..K-1]
@@ -216,11 +216,15 @@ class StaticSparseCRF(nn.Module):
             trans_t = trans[curr]  # (B, M)
 
             match = (inc_idx_t == prev.unsqueeze(1)) & inc_mask_t  # (B, M)
-            trans_score = torch.where(
-                match,
-                trans_t,
-                trans_t.new_full(trans_t.shape, self.forbid_score),
-            ).max(dim=1).values
+            trans_score = (
+                torch.where(
+                    match,
+                    trans_t,
+                    trans_t.new_full(trans_t.shape, self.forbid_score),
+                )
+                .max(dim=1)
+                .values
+            )
 
             score += (emit_score + trans_score) * mask[:, t].float()
 

@@ -20,8 +20,8 @@ class Preprocessor:
         events = events.drop(columns=["start_x", "start_y", "utc_timestamp"], errors="ignore")
 
         tracking_ = tracking.set_index("frame_id")
-        events["x"] = events["frame_id"].apply(lambda x: tracking_.at[x, "ball_x"])
-        events["y"] = events["frame_id"].apply(lambda x: tracking_.at[x, "ball_y"])
+        events["start_x"] = events["frame_id"].apply(lambda x: tracking_.at[x, "ball_x"])
+        events["start_y"] = events["frame_id"].apply(lambda x: tracking_.at[x, "ball_y"])
 
         self.tracking, self.events = utils.label_frames_and_episodes(tracking, events)
 
@@ -99,7 +99,7 @@ class Preprocessor:
 
         else:
             ball_xy = rdp_points[:, 1:]
-            event_xy = events[["x", "y"]].to_numpy()
+            event_xy = events[["start_x", "start_y"]].to_numpy()
             dists = np.linalg.norm(event_xy[:, None, :] - ball_xy[None, :, :], axis=2)
             score_mat = 100.0 * (1.0 - dists / max_dist)
             score_mat = np.clip(score_mat, -100.0, 100.0)
@@ -205,8 +205,8 @@ class Preprocessor:
         touches.loc[event_mask, "player_id"] = ep_events["player_id"].values
         touches.loc[event_mask, "event_type"] = ep_events["spadl_type"].values
 
-        touches["x"] = touches["frame_id"].apply(lambda x: ep_tracking.at[x, "ball_x"])
-        touches["y"] = touches["frame_id"].apply(lambda x: ep_tracking.at[x, "ball_y"])
+        touches["start_x"] = touches["frame_id"].apply(lambda x: ep_tracking.at[x, "ball_x"])
+        touches["start_y"] = touches["frame_id"].apply(lambda x: ep_tracking.at[x, "ball_y"])
 
         for i, row in touches[~event_mask].iterrows():
             frame_id = int(round(row["frame_id"]))
@@ -237,7 +237,7 @@ class Preprocessor:
             player_x = tracking_row[player_x_cols].dropna().astype(float)
             player_y = tracking_row[player_y_cols].dropna().astype(float)
 
-            dists = np.sqrt((player_x.values - row["x"]) ** 2 + (player_y.values - row["y"]) ** 2)
+            dists = np.sqrt((player_x.values - row["start_x"]) ** 2 + (player_y.values - row["start_y"]) ** 2)
             min_idx = dists.argmin()
 
             if dists[min_idx] >= max_dist:
@@ -246,9 +246,10 @@ class Preprocessor:
             touches.at[i, "player_id"] = player_x.index[min_idx][:-2]
 
         if event_mask.any():
-            last_event_frame = touches.loc[event_mask, "frame_id"].max()
-            pitch_mask = (touches["x"].between(1, config.PITCH_X - 1)) & (touches["y"].between(1, config.PITCH_Y - 1))
-            out_points = touches[(touches["frame_id"] > last_event_frame) & ~pitch_mask]
+            frame_mask = touches["frame_id"] > touches.loc[event_mask, "frame_id"].max()
+            x_mask = touches["start_x"].between(1, config.PITCH_X - 1)
+            y_mask = touches["start_y"].between(1, config.PITCH_Y - 1)
+            out_points = touches[frame_mask & ~(x_mask & y_mask)]
             if not out_points.empty:
                 out_idx = out_points.index[0]
                 shot_mask = ep_events["spadl_type"] == "shot"
@@ -292,8 +293,8 @@ class Preprocessor:
         row_idx = ep_tracking.index.get_indexer(frame_ids)
         x_col_idx = ep_tracking.columns.get_indexer(player_ids + "_x")
         y_col_idx = ep_tracking.columns.get_indexer(player_ids + "_y")
-        touches.loc[player_mask, "x"] = ep_tracking.to_numpy()[row_idx, x_col_idx].astype(float).round(2)
-        touches.loc[player_mask, "y"] = ep_tracking.to_numpy()[row_idx, y_col_idx].astype(float).round(2)
+        touches.loc[player_mask, "start_x"] = ep_tracking.to_numpy()[row_idx, x_col_idx].astype(float).round(2)
+        touches.loc[player_mask, "start_y"] = ep_tracking.to_numpy()[row_idx, y_col_idx].astype(float).round(2)
 
         return touches
 
@@ -317,15 +318,15 @@ class Preprocessor:
         touches.loc[goal_mask, "event_type"] = "goal"
 
         ratio = config.PITCH_Y / config.PITCH_X
-        diag1 = touches["y"] - ratio * touches["x"]
-        diag2 = touches["y"] + ratio * touches["x"] - config.PITCH_Y
+        diag1 = touches["start_y"] - ratio * touches["start_x"]
+        diag2 = touches["start_y"] + ratio * touches["start_x"] - config.PITCH_Y
 
         out_l = out_mask & (diag1 > 0) & (diag2 < 0)
         out_r = out_mask & (diag1 < 0) & (diag2 > 0)
         out_b = out_mask & (diag1 < 0) & (diag2 < 0)
         out_t = out_mask & (diag1 > 0) & (diag2 > 0)
-        goal_l = goal_mask & (touches["x"] < 10)
-        goal_r = goal_mask & (touches["x"] > config.PITCH_X - 10)
+        goal_l = goal_mask & (touches["start_x"] < 10)
+        goal_r = goal_mask & (touches["start_x"] > config.PITCH_X - 10)
 
         touches.loc[out_l, "player_id"] = "out_left"
         touches.loc[out_r, "player_id"] = "out_right"
@@ -364,7 +365,7 @@ class Preprocessor:
 if __name__ == "__main__":
     IN_EVENT_DIR = "data/sportec/event_synced"
     IN_TRACKING_DIR = "data/sportec/tracking_parquet"
-    OUT_EVENT_DIR = "data/sportec/event_rdp"
+    OUT_EVENT_DIR = "data/sportec/event_processed"
     OUT_TRACKING_DIR = "data/sportec/tracking_processed"
 
     os.makedirs(OUT_EVENT_DIR, exist_ok=True)

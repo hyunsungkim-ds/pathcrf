@@ -20,7 +20,7 @@ def count_dataset_stats(
     drop_short_episodes: bool = False,
 ) -> Tuple[int, int, int]:
     TRACKING_DIR = "data/sportec/tracking_processed"
-    EVENT_DIR = "data/sportec/event_rdp"
+    EVENT_DIR = "data/sportec/event_processed"
 
     window_size = int(round(window_seconds * fps / sample_freq))
     window_stride = int(window_stride)

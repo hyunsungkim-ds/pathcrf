@@ -180,10 +180,45 @@ def detect_events(tracking: pd.DataFrame, edge_seq: pd.DataFrame, min_dur: int =
     return pd.DataFrame(events)
 
 
+def simplify_events(events: pd.DataFrame, drop_fouls: bool = True) -> pd.DataFrame:
+    """
+    Simplify event categories into kick/control/out using the next event in the same episode.
+
+    Rules:
+    - If event_type is "out" -> "out"
+    - Else if next event is performed by the same player -> "control"
+    - Else if next event is performed by another player -> "kick"
+    Events without a next event (and not "out") are dropped.
+    """
+    events = events.copy()
+    if drop_fouls:
+        events = events[events["event_type"] != "foul"].copy()
+
+    events["seconds"] = events["timestamp"].apply(utils.timestamp_to_seconds)
+    events = events.sort_values("frame_id", ignore_index=True, kind="stable")
+
+    next_player_ids = events.groupby("episode_id")["player_id"].shift(-1)
+
+    simple_types = pd.Series(index=events.index, dtype=object)
+    simple_types[events["event_type"] == "out"] = "out"
+
+    non_out_mask = events["event_type"] != "out"
+    same_player = events["player_id"] == next_player_ids
+    simple_types[non_out_mask & same_player] = "control"
+    simple_types[non_out_mask & ~same_player & next_player_ids.notna()] = "kick"
+
+    last_mask = non_out_mask & next_player_ids.isna()
+    simple_types[last_mask & events["event_type"].isna()] = "kick"
+    simple_types[last_mask & events["event_type"].isin(config.OUTGOING)] = "kick"
+    simple_types[last_mask & events["event_type"].isin(config.INCOMING)] = "control"
+
+    events["event_type"] = simple_types
+    events = events[events["event_type"].isin(config.SIMPLE_TYPES)].copy()
+    return events
+
+
 def classify_setpieces(events: pd.DataFrame) -> pd.DataFrame:
     events = events.copy()
-    x_col = "x" if "x" in events.columns else "start_x"
-    y_col = "y" if "y" in events.columns else "start_y"
 
     origin_x = float(mps.pitch_config["origin_x"])
     origin_y = float(mps.pitch_config["origin_y"])
@@ -207,8 +242,8 @@ def classify_setpieces(events: pd.DataFrame) -> pd.DataFrame:
     goalkick_margin = 3.0
 
     for idx in events.index:
-        x = float(events.at[idx, x_col])
-        y = float(events.at[idx, y_col])
+        x = float(events.at[idx, "start_x"])
+        y = float(events.at[idx, "start_y"])
         if not np.isfinite(x) or not np.isfinite(y):
             continue
 
@@ -233,14 +268,6 @@ def classify_setpieces(events: pd.DataFrame) -> pd.DataFrame:
         if near_y and ((is_home and near_x_left) or (is_away and near_x_right)):
             events.at[idx, "event_type"] = "goalkick"
 
-    return events
-
-
-def classify_episode_starts(events: pd.DataFrame) -> pd.DataFrame:
-    """Extract episode start events, classify set pieces, and update event_type."""
-    events = events.copy()
-    episode_starts = classify_setpieces(events.groupby("episode_id").head(1))
-    events.loc[episode_starts.index, "event_type"] = episode_starts["event_type"]
     return events
 
 

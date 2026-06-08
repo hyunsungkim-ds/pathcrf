@@ -97,6 +97,7 @@ def run_epoch(
     device: torch.device,
     optimizer: torch.optim.Optimizer = None,
     macro_weight: float = 0,
+    micro_weight: float = 1.0,
     rloss_weight: float = 0,
     crf_weight: float = 0,
     use_emit_loss: bool = False,
@@ -316,7 +317,7 @@ def run_epoch(
                     loss_dict["src_acc"].append(src_acc.item())
                     loss_dict["dst_acc"].append(dst_acc.item())
 
-                    loss = macro_weight * macro_loss + micro_loss + crf_weight * crf_loss
+                    loss = macro_weight * macro_loss + micro_weight * micro_loss + crf_weight * crf_loss
 
                 else:  # module.micro_type == "ball"
                     micro_loss = nn.MSELoss()(micro_out, micro_target)
@@ -360,18 +361,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--trial", type=int, required=False)
+    parser.add_argument("--sources", type=str, nargs="+", default=["sportec"])
+    parser.add_argument("--lomocv", action="store_true", default=False, help="Enable leave-one-match-out CV")
+    parser.add_argument("--cv_fold_idx", type=int, default=0, help="Index of the test match file (0-indexed)")
+    parser.add_argument("--noise", type=str, default=None, help="Noise variant 'scenario_level' (e.g. bias_low)")
+
     macro_choices = ["none", "poss_team", "poss_prev", "poss_next", "poss_player", "poss_edge"]
     parser.add_argument("--macro_type", type=str, choices=macro_choices)
     parser.add_argument("--micro_type", type=str, default="ball", choices=["ball", "poss_edge"])
-
-    parser.add_argument("--data_dir", type=str, default="data/sportec/tracking_processed")
     parser.add_argument("--node_in_dim", type=int, default=8, help="Number of node features to use")
     parser.add_argument("--edge_in_dim", type=int, default=0, help="Number of edge features to use in GNNLSTM")
     parser.add_argument("--team_size", type=int, default=11, help="Max number of players in a team")
-    parser.add_argument("--fps", type=float, default=25.0, help="Tracking frame rate")
-    parser.add_argument("--sample_freq", type=int, default=5, help="Downsampling frequency")
+    parser.add_argument("--target_fps", type=float, default=5.0, help="Target FPS after downsampling")
     parser.add_argument("--window_seconds", type=float, default=10.0, help="Window length in seconds")
     parser.add_argument("--window_stride", type=int, default=1, help="Step size between windows")
+    parser.add_argument("--ball_feature", action="store_true", default=False, help="Include ball xy as input feature")
     parser.add_argument("--no_self_loops", action="store_true", help="Disable self-loops in the graph")
     parser.add_argument("--flip_pitch", action="store_true", default=False, help="Augment data by flipping the pitch")
 
@@ -390,7 +394,8 @@ if __name__ == "__main__":
     parser.add_argument("--src_loss", action="store_true", default=False)
     parser.add_argument("--dst_loss", action="store_true", default=False)
     parser.add_argument("--team_loss", action="store_true", default=False)
-    parser.add_argument("--macro_weight", type=float, default=0.0, help="Weight for the macro loss")
+    parser.add_argument("--macro_weight", type=float, default=0.0, help="Weight for the macro loss (lambda_1)")
+    parser.add_argument("--micro_weight", type=float, default=1.0, help="Weight for the micro loss (lambda_2)")
     parser.add_argument("--rloss_weight", type=float, default=0.0, help="Weight for the reality loss")
     parser.add_argument("--crf_weight", type=float, default=0.0, help="Weight for the CRF loss")
     parser.add_argument("--l1_weight", type=float, required=False, default=0, help="Weight for the L1 loss")
@@ -449,42 +454,82 @@ if __name__ == "__main__":
     # Create save path and saving parameters
     save_path = f"saved/{args.trial:03d}"
     if is_main:
-        print("Generating datasets...")
         os.makedirs(f"{save_path}/model", exist_ok=True)
         with open(f"{save_path}/args.json", "w") as f:
             json.dump(args_dict, f, indent=4)
 
-    data_paths = [os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir) if f.endswith(".parquet")]
-    data_paths.sort()
-    train_paths = data_paths[:5]
-    valid_paths = data_paths[5:6]
-
-    dataset_args = {
-        "node_in_dim": args.node_in_dim,
-        "edge_in_dim": args.edge_in_dim,
-        "fps": args.fps,
-        "sample_freq": args.sample_freq,
-        "window_seconds": args.window_seconds,
-        "window_stride": args.window_stride,
-        "self_loops": not args.no_self_loops,
-        "flip_pitch": args.flip_pitch,
+    SOURCE_CFG = {
+        "sportec": {"fps": 25.0, "n_train": 5, "n_val": 1},
+        "kleague": {"fps": 10.0, "n_train": 10, "n_val": 2},
+        "tracab": {"fps": 25.0, "n_train": 1, "n_val": 0},
     }
+    for src in args.sources:
+        assert src in SOURCE_CFG, f"Unknown source: {src}. Available: {list(SOURCE_CFG.keys())}"
 
-    if args.agent_model == "gat":
-        train_dataset = SoccerWindowGraphs(train_paths, verbose=is_main, **dataset_args)
-        valid_dataset = SoccerWindowGraphs(valid_paths, verbose=is_main, **dataset_args)
+    DatasetClass = SoccerWindowGraphs if args.agent_model == "gat" else SoccerWindowTensors
+
+    def _build_datasets(sources):
+        train_datasets, val_datasets = [], []
+        for src in sources:
+            cfg = SOURCE_CFG[src]
+            src_dir = f"data/{src}/tracking_noisy/{args.noise}" if args.noise else f"data/{src}/tracking_processed"
+            src_files = sorted(os.path.join(src_dir, f) for f in os.listdir(src_dir) if f.endswith(".parquet"))
+
+            if args.lomocv:
+                # LOMOCV: cv_fold_idx selects the test file (excluded from training).
+                # Validation is fixed to the file immediately before test (wrapping around).
+                n_files = len(src_files)
+                assert args.cv_fold_idx < n_files, f"cv_fold_idx {args.cv_fold_idx} >= n_files {n_files}"
+                test_idx = args.cv_fold_idx
+                val_idx = (test_idx - 1) % n_files
+                val_files = [src_files[val_idx]]
+                train_files = [f for i, f in enumerate(src_files) if i not in (test_idx, val_idx)]
+                if is_main:
+                    print(
+                        f"LOMOCV fold {args.cv_fold_idx}/{n_files}: "
+                        f"train={len(train_files)} files, "
+                        f"val={os.path.basename(val_files[0])}, "
+                        f"test={os.path.basename(src_files[test_idx])}\n"
+                    )
+            else:
+                train_files = src_files[: cfg["n_train"]]
+                val_files = src_files[cfg["n_train"] : cfg["n_train"] + cfg["n_val"]]
+
+            print("Generating datasets...")
+            dataset_args = {
+                "node_in_dim": args.node_in_dim,
+                "edge_in_dim": args.edge_in_dim,
+                "fps": cfg["fps"],
+                "sample_freq": int(cfg["fps"] / args.target_fps),
+                "window_seconds": args.window_seconds,
+                "window_stride": args.window_stride,
+                "ball_feature": args.ball_feature,
+                "self_loops": not args.no_self_loops,
+                "flip_pitch": args.flip_pitch,
+            }
+            train_datasets.append(DatasetClass(train_files, verbose=is_main, **dataset_args))
+            val_datasets.append(DatasetClass(val_files, verbose=is_main, **dataset_args))
+        return train_datasets, val_datasets
+
+    train_datasets, val_datasets = _build_datasets(args.sources)
+
+    if len(train_datasets) == 1:
+        train_dataset = train_datasets[0]
+        val_dataset = val_datasets[0]
     else:
-        train_dataset = SoccerWindowTensors(train_paths, verbose=is_main, **dataset_args)
-        valid_dataset = SoccerWindowTensors(valid_paths, verbose=is_main, **dataset_args)
+        from torch.utils.data import ConcatDataset
+
+        train_dataset = ConcatDataset(train_datasets)
+        val_dataset = ConcatDataset(val_datasets)
 
     pin_memory = torch.cuda.is_available()
     num_workers = args.num_workers
 
     train_sampler = None
-    valid_sampler = None
+    val_sampler = None
     if distributed:
         train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=args.seed, drop_last=False)
-        valid_sampler = DistributedSampler(valid_dataset, shuffle=False, seed=args.seed, drop_last=False)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False, seed=args.seed, drop_last=False)
 
     collate_fn = utils.collate_window_batch if args.agent_model == "gat" else None
     train_loader = DataLoader(
@@ -496,11 +541,11 @@ if __name__ == "__main__":
         pin_memory=pin_memory,
         collate_fn=collate_fn,
     )
-    valid_loader = DataLoader(
-        valid_dataset,
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        sampler=valid_sampler,
+        sampler=val_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         collate_fn=collate_fn,
@@ -524,6 +569,10 @@ if __name__ == "__main__":
             utils.printlog(f"Loading resume checkpoint: {resume_path}", save_path)
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         module.load_state_dict(ckpt)
+
+    epoch_times = []
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
 
     for e in range(args.n_epochs):
         epoch = e + 1
@@ -550,6 +599,7 @@ if __name__ == "__main__":
             device=device,
             optimizer=optimizer,
             macro_weight=args.macro_weight,
+            micro_weight=args.micro_weight,
             rloss_weight=rloss_weight,
             crf_weight=crf_weight,
             use_emit_loss=args.emit_loss,
@@ -563,11 +613,12 @@ if __name__ == "__main__":
         if is_main:
             utils.printlog(f"Train:\t {utils.loss_str(train_losses)}", save_path)
 
-        valid_losses = run_epoch(
+        val_losses = run_epoch(
             model,
-            valid_loader,
+            val_loader,
             device,
             macro_weight=args.macro_weight,
+            micro_weight=args.micro_weight,
             rloss_weight=rloss_weight,
             crf_weight=crf_weight,
             use_emit_loss=args.emit_loss,
@@ -576,23 +627,31 @@ if __name__ == "__main__":
             train=False,
         )
         if is_main:
-            utils.printlog(f"Valid:\t {utils.loss_str(valid_losses)}", save_path)
-            utils.printlog(f"Time:\t {time.time() - start_time:.2f}s", save_path)
+            utils.printlog(f"Val:\t {utils.loss_str(val_losses)}", save_path)
+            elapsed = time.time() - start_time
+            epoch_times.append(elapsed)
+            avg_time = sum(epoch_times) / len(epoch_times)
+            time_log = f"Time:\t {elapsed:.2f} s (avg {avg_time:.2f} s/epoch)"
+            utils.printlog(time_log, save_path)
+            if torch.cuda.is_available():
+                peak_mem_mb = torch.cuda.max_memory_allocated(device) / (1024**2)
+                memory_log = f"GPU:\t {peak_mem_mb:.0f} MB"
+                utils.printlog(memory_log, save_path)
 
-        valid_total_loss = sum([value for key, value in valid_losses.items() if key.endswith("loss")])
+        val_total_loss = sum([value for key, value in val_losses.items() if key.endswith("loss")])
 
-        # Best model on validation set
+        # Best model on validation data
         if args.crf_weight > 0 and epoch <= args.ce_epochs:
-            if best_pretrain_loss == np.inf or valid_total_loss < best_pretrain_loss:
-                best_pretrain_loss = valid_total_loss
+            if best_pretrain_loss == np.inf or val_total_loss < best_pretrain_loss:
+                best_pretrain_loss = val_total_loss
                 if is_main:
                     path = f"{save_path}/model/state_dict_best_pretrain.pt"
                     torch.save(module.state_dict(), path)
                     utils.printlog("###### Best Pretrain Loss #######", save_path)
         else:
             force_best = args.crf_weight > 0 and epoch == args.ce_epochs + 1
-            if force_best or best_total_loss == np.inf or valid_total_loss < best_total_loss:
-                best_total_loss = valid_total_loss
+            if force_best or best_total_loss == np.inf or val_total_loss < best_total_loss:
+                best_total_loss = val_total_loss
                 epochs_since_best = 0
                 if is_main:
                     path = f"{save_path}/model/state_dict_best.pt"
@@ -601,16 +660,16 @@ if __name__ == "__main__":
             else:
                 epochs_since_best += 1
 
-            if "edge_acc" in valid_losses and valid_losses["edge_acc"] > best_micro_acc:
-                best_micro_acc = valid_losses["edge_acc"]
+            if "edge_acc" in val_losses and val_losses["edge_acc"] > best_micro_acc:
+                best_micro_acc = val_losses["edge_acc"]
                 epochs_since_best = 0
                 if is_main:
                     path = f"{save_path}/model/state_dict_best_acc.pt"
                     torch.save(module.state_dict(), path)
                     utils.printlog("######### Best Accuracy #########", save_path)
 
-            if "pos_error" in valid_losses and (best_pos_error == np.inf or valid_losses["pos_error"] < best_pos_error):
-                best_pos_error = valid_losses["pos_error"]
+            if "pos_error" in val_losses and (best_pos_error == np.inf or val_losses["pos_error"] < best_pos_error):
+                best_pos_error = val_losses["pos_error"]
                 epochs_since_best = 0
                 if is_main:
                     path = f"{save_path}/model/state_dict_best_pe.pt"
@@ -624,7 +683,7 @@ if __name__ == "__main__":
             utils.printlog("########## Saved Model ##########", save_path)
 
     if is_main:
-        utils.printlog(f"Best Valid Loss: {best_total_loss:.4f}", save_path)
+        utils.printlog(f"Best Val Loss: {best_total_loss:.4f}", save_path)
 
     if distributed and dist.is_initialized():
         dist.destroy_process_group()

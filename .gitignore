@@ -2,9 +2,12 @@
 data/
 saved/
 animations/
-private/
 *.npy
 *.pkl
+
+# Private code and markdown files
+private/
+.claude/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

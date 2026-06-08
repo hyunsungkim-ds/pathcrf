@@ -25,8 +25,7 @@ anim_config = {
     "player_history": 20,
     "ball_history": 50,
     "edge_threshold": 0.05,
-    "self_loop_scale": 2.0,
-    "self_loop_linewidth_base": 0.8,
+    "self_loop_scale": 3.0,
     "arrow_head_scale": 2.5,
     "arrow_tail_scale": 1.0,
 }
@@ -43,7 +42,8 @@ class Animator:
         edge_weights: Optional[pd.DataFrame] = None,
         show_times: bool = True,
         show_episodes: bool = False,
-        show_events: bool = False,
+        show_event_table: bool = False,
+        show_event_markers: bool = False,
         text_cols: bool = None,  # column names for additional annotation
         rotate_pitch: bool = False,
         anonymize: bool = False,
@@ -60,16 +60,26 @@ class Animator:
             self.events = None
         else:
             # Filter events to only those within the tracking data's frame range
-            if "frame_id" in track_dict["main"].columns:
-                valid_frame_ids = track_dict["main"]["frame_id"].unique()
-                self.events = events[events["frame_id"].isin(valid_frame_ids)]
-            else:
-                self.events = events
+            tracking = track_dict["main"]
+            if "frame_id" in tracking.columns and "frame_id" in events.columns:
+                valid_frame_ids = tracking["frame_id"].unique()
+                events = events[events["frame_id"].isin(valid_frame_ids)]
+            if "timestamp" in tracking.columns and "timestamp" in events.columns:
+                for pid in events["period_id"].unique():
+                    ts_period = tracking.loc[tracking["period_id"] == pid, "timestamp"]
+                    if ts_period.empty:
+                        events = events[events["period_id"] != pid]
+                    else:
+                        ts_min, ts_max = ts_period.min(), ts_period.max()
+                        mask = (events["period_id"] == pid) & (events["timestamp"].between(ts_min, ts_max))
+                        events = events[mask | (events["period_id"] != pid)]
+            self.events = events.copy()
 
         self.sports = anim_config["sports"]
         self.show_times = show_times
         self.show_episodes = show_episodes
-        self.show_events = show_events
+        self.show_event_table = show_event_table
+        self.show_event_markers = show_event_markers
         self.text_cols = text_cols
         self.rotate_pitch = rotate_pitch
         self.anonymize = anonymize
@@ -173,12 +183,13 @@ class Animator:
             c=color,
             edgecolors=edgecolor,
             marker=marker,
+            alpha=0.5,
             zorder=4,
         )
 
         if show_path:
             pathcolor = "k" if color == "w" else color
-            (plot,) = ax.plot([], [], pathcolor, zorder=3)
+            (plot,) = ax.plot([], [], pathcolor, alpha=0.5, zorder=3)
         else:
             plot = None
 
@@ -351,14 +362,14 @@ class Animator:
             away_players = [c[:-2] for c in away_tracking.columns[0::2]]
             player_order = home_players + away_players
 
-            base_lw = anim_config["self_loop_linewidth_base"]
-            lw_mat = np.full((tracking.shape[0], len(player_order)), base_lw, dtype=float)
+            # No border by default; only the ball-possessing player (high self-loop weight) gets a thick one
+            lw_mat = np.zeros((tracking.shape[0], len(player_order)), dtype=float)
             for i, p in enumerate(player_order):
                 if f"{p}-{p}" in edge_weights.columns:
                     w = edge_weights[f"{p}-{p}"].to_numpy(dtype=float)
                     w = np.where(np.isnan(w), 0.0, w)
                     mask = w >= anim_config["edge_threshold"]
-                    lw_mat[mask, i] = base_lw + w[mask] * anim_config["self_loop_scale"]
+                    lw_mat[mask, i] = w[mask] * anim_config["self_loop_scale"]
 
             n_players = len(home_players)
             home_sizes = base_size
@@ -445,7 +456,7 @@ class Animator:
 
         table_ax = None
         if self.sports == "soccer":
-            if self.show_events and self.events is not None:
+            if self.show_event_table:
                 fig = plt.figure(figsize=(anim_config["figsize"][0] * 1.35, anim_config["figsize"][1]))
                 gs = fig.add_gridspec(1, 2, width_ratios=[4.5, 1.5], wspace=0.05)
                 ax = fig.add_subplot(gs[0, 0])
@@ -462,7 +473,7 @@ class Animator:
             ax.set_axis_off()
             fig.subplots_adjust(left=0.02, right=0.92, bottom=0.05, top=0.95)
         else:
-            if self.events is not None:
+            if self.show_event_table:
                 fig = plt.figure(figsize=(10 * 1.35, 5.2))
                 gs = fig.add_gridspec(1, 2, width_ratios=[4.5, 1.5], wspace=0.05)
                 ax = fig.add_subplot(gs[0, 0])
@@ -573,14 +584,96 @@ class Animator:
             )
             episode_text.set_animated(True)
 
-        if self.show_events:
+        event_attr = None
+        events_str = None
+        event_state = None
+        annot_state = None
+
+        if self.show_event_table:
             if self.events is not None:
-                event_attr = Animator.plot_event_table(self.events, fig, table_ax, frame_times)
+                events = self.events
+            elif "event_type" in main_tracking.columns:
+                event_mask = main_tracking["event_type"].notna()
+                event_cols = ["frame_id", "timestamp", "player_id", "event_type"]
+                events = main_tracking.loc[event_mask, event_cols].copy()
+            else:
+                events = None
+
+            if events is not None and not events.empty:
+                event_attr = Animator.plot_event_table(events, fig, table_ax, frame_times)
+
+        if self.show_event_markers:
+            n_frames = main_tracking.shape[0]
+
+            if isinstance(self.events, pd.DataFrame):
+                events: pd.DataFrame = self.events.sort_values(["period_id", "timestamp"]).reset_index(drop=True)
+                track_ts = main_tracking["timestamp"].to_numpy(dtype=float)
+
+                # Match each event to the nearest tracking index per period
+                event_idx = np.empty(len(events), dtype=int)
+                for pid in events["period_id"].unique():
+                    period_event_mask = events["period_id"] == pid
+                    period_track_mask = main_tracking["period_id"] == pid
+                    period_track_idx = np.where(period_track_mask)[0]
+                    if len(period_track_idx) == 0:
+                        event_idx[period_event_mask] = 0
+                        continue
+                    period_tts = track_ts[period_track_idx]
+                    period_ets = events.loc[period_event_mask, "timestamp"].to_numpy(dtype=float)
+
+                    # Pick whichever bracketing frame is closer in time (ties go to the left/earlier frame)
+                    right = np.searchsorted(period_tts, period_ets, side="left").clip(0, len(period_tts) - 1)
+                    left = np.clip(right - 1, 0, len(period_tts) - 1)
+                    dist_left = np.abs(period_tts[left] - period_ets)
+                    dist_right = np.abs(period_tts[right] - period_ets)
+                    nearest = np.where(dist_left <= dist_right, left, right)
+
+                    event_idx[period_event_mask] = period_track_idx[nearest]
+
+                # Build per-frame text: each event persists until the next event
+                events_str = np.full(n_frames, "", dtype=object)
+                marker_x = np.full(n_frames, np.nan)
+                marker_y = np.full(n_frames, np.nan)
+
+                event_players = events["player_id"].astype(str).to_numpy()
+                has_xy = "start_x" in events.columns
+                if has_xy:
+                    event_x = events["start_x"].to_numpy(dtype=float)
+                    event_y = events["start_y"].to_numpy(dtype=float)
+
+                if "spadl_type" in events.columns:
+                    event_types = events["spadl_type"].astype(str).to_numpy()
+                elif "event_type" in events.columns:
+                    event_types = events["event_type"].astype(str).to_numpy()
+                elif "event_types" in events.columns:
+                    event_types = events["event_types"].astype(str).to_numpy()
+
+                for i in range(len(events)):
+                    start = event_idx[i]
+                    end = event_idx[i + 1] if i + 1 < len(events) else n_frames
+                    label = f"{event_types[i]} by {event_players[i]}" if event_types[i] != "nan" else ""
+                    events_str[start:end] = label
+                    if has_xy and np.isfinite(event_x[i]):
+                        marker_x[start:end] = event_x[i]
+                        marker_y[start:end] = event_y[i]
+
+                if np.any(np.isfinite(marker_x)):
+                    event_xy = pd.DataFrame({"event_x": marker_x, "event_y": marker_y})
+                    event_state = Animator.plot_events(event_xy, ax, color="orange", marker="*")
 
             elif "event_type" in main_tracking.columns:
                 events_str = main_tracking.apply(lambda x: f"{x['event_type']} by {x['player_id']}", axis=1)
                 events_str = np.where(events_str == "nan by nan", "", events_str)
 
+                if "event_x" in main_tracking.columns:
+                    event_xy = main_tracking[["event_x", "event_y"]]
+                    event_state = Animator.plot_events(event_xy, ax, color="orange", marker="*")
+
+                if "annot_x" in main_tracking.columns:
+                    annot_xy = main_tracking[["annot_x", "annot_y"]]
+                    annot_state = Animator.plot_events(annot_xy, ax, color="k", marker="X")
+
+            if events_str is not None:
                 text_x = config.PITCH_X / 2
                 event_text = ax.text(
                     text_x,
@@ -591,14 +684,6 @@ class Animator:
                     va="bottom",
                 )
                 event_text.set_animated(True)
-
-                if "event_x" in main_tracking.columns:
-                    event_xy = main_tracking[["event_x", "event_y"]]
-                    event_state = Animator.plot_events(event_xy, ax, color="orange", marker="*")
-
-                if "annot_x" in main_tracking.columns:
-                    annot_xy = main_tracking[["annot_x", "annot_y"]]
-                    annot_state = Animator.plot_events(annot_xy, ax, color="k", marker="X")
 
         if self.text_cols is not None:
             str_dict = {}
@@ -674,15 +759,15 @@ class Animator:
             if self.show_episodes:
                 episode_text.set_text(str(episodes_str[t]))
 
-            if self.show_events:
-                if self.events is not None:
-                    Animator.animate_event_table(t, frame_times, event_attr)
-                elif "event_type" in main_tracking.columns:
-                    event_text.set_text(events_str[t])
-                    if "event_x" in main_tracking.columns:
-                        Animator.animate_events(t, *event_state)
-                    if "annot_x" in main_tracking.columns:
-                        Animator.animate_events(t, *annot_state)
+            if self.show_event_table and event_attr is not None:
+                Animator.animate_event_table(t, frame_times, event_attr)
+
+            if self.show_event_markers and events_str is not None:
+                event_text.set_text(str(events_str[t]))
+                if event_state is not None:
+                    Animator.animate_events(t, *event_state)
+                if annot_state is not None:
+                    Animator.animate_events(t, *annot_state)
 
             if self.text_cols is not None:
                 for col in self.text_cols:
@@ -691,36 +776,31 @@ class Animator:
             # --- Event Arrows & Highlights ---
             # Check for new events to spawn arrows or circles
             if events_by_frame:
-                # Get frame_id safely
-                try:
-                    raw_fid = main_tracking.iloc[t].get("frame_id")
-                    if pd.notna(raw_fid):
-                        curr_fid = int(raw_fid)
+                raw_fid = main_tracking.iloc[t].get("frame_id")
+                if pd.notna(raw_fid):
+                    curr_fid = int(raw_fid)
 
-                        if curr_fid in events_by_frame:
-                            for _, ev in events_by_frame[curr_fid].iterrows():
-                                # Use duration if provided (frames until next event), else default 50 frames (2s)
-                                duration = int(ev.get("duration", 50))
-                                expire_t = t + duration
+                    if curr_fid in events_by_frame:
+                        for _, ev in events_by_frame[curr_fid].iterrows():
+                            # Use duration if provided (frames until next event), else default 50 frames (2s)
+                            duration = int(ev.get("duration", 50))
+                            expire_t = t + duration
 
-                                # 1. Arrows (for Passes)
-                                if ev.get("show_arrow", False):
-                                    start = (ev.get("x", 0), ev.get("y", 0))
-                                    end = (ev.get("end_x", 0), ev.get("end_y", 0))
-                                    color = ev.get("arrow_color", "red")
+                            if ev.get("show_arrow", False):
+                                start = (ev.get("start_x", 0), ev.get("start_y", 0))
+                                end = (ev.get("end_x", 0), ev.get("end_y", 0))
+                                color = ev.get("arrow_color", "red")
 
-                                    arr = patches.FancyArrowPatch(
-                                        start,
-                                        end,
-                                        arrowstyle="Simple,head_length=5,head_width=5,tail_width=1",
-                                        color=color,
-                                        zorder=200,
-                                        mutation_scale=8,
-                                    )
-                                    ax.add_patch(arr)
-                                    active_arrows.append((arr, expire_t))
-                except Exception:
-                    pass
+                                arr = patches.FancyArrowPatch(
+                                    start,
+                                    end,
+                                    arrowstyle="Simple,head_length=5,head_width=5,tail_width=1",
+                                    color=color,
+                                    zorder=200,
+                                    mutation_scale=8,
+                                )
+                                ax.add_patch(arr)
+                                active_arrows.append((arr, expire_t))
 
             # Clean up arrows/circles
             for i in range(len(active_arrows) - 1, -1, -1):

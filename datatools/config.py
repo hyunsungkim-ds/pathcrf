@@ -3,6 +3,15 @@ RDP_FRAME_SCALE = 1e-6
 RDP_MIN_ANGLE = 15.0
 POSS_MAX_DIST = 5.0
 
+TRACKING_COLS = [
+    "period_id",
+    "timestamp",
+    "phase_id",
+    "episode_id",
+    "ball_state",
+    "ball_owning_team_id",
+    "player_id",
+]
 EVENT_COLS = [
     "period_id",
     "phase_id",
@@ -19,14 +28,25 @@ EVENT_COLS = [
     "end_x",
     "end_y",
 ]
-TRACKING_COLS = [
+ALIGNED_COLS = [
+    "frame_id",
     "period_id",
-    "timestamp",
-    "phase_id",
     "episode_id",
-    "ball_state",
-    "ball_owning_team_id",
+    "timestamp",
     "player_id",
+    "spadl_type",
+    "success",
+    "score",
+]
+TOUCH_COLS = [
+    "frame_id",
+    "period_id",
+    "episode_id",
+    "timestamp",
+    "player_id",
+    "event_type",
+    "start_x",
+    "start_y",
 ]
 
 PASS_LIKE_OPEN = ["pass", "cross", "shot", "clearance", "shot_block", "keeper_punch", "keeper_save", "keeper_sweeper"]
@@ -35,5 +55,5 @@ SET_PIECE = SET_PIECE_OOP + ["freekick_short", "freekick_crossed", "shot_freekic
 INCOMING = ["control", "interception", "ball_recovery", "keeper_claim", "keeper_pick_up"]
 MINOR = ["tackle", "take_on", "second_take_on", "foul", "bad_touch", "dispossessed"]
 
-ALIGNED_COLS = ["frame_id", "period_id", "episode_id", "timestamp", "player_id", "spadl_type", "success", "score"]
-TOUCH_COLS = ["frame_id", "period_id", "episode_id", "timestamp", "player_id", "event_type", "x", "y"]
+OUTGOING = PASS_LIKE_OPEN + SET_PIECE + ["tackle", "bad_touch", "dispossessed", "kick"]
+SIMPLE_TYPES = ["kick", "control", "out"]

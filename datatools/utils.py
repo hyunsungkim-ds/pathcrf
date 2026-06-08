@@ -18,7 +18,7 @@ def detect_keepers(period_tracking: pd.DataFrame, left_first=False):
     away_x_cols = [c for c in period_tracking.columns if re.match(r"away_.*_x", c)]
 
     home_gk = (period_tracking[home_x_cols].mean() - config.PITCH_X / 2).abs().idxmax()[:-2]
-    away_gk = (period_tracking[away_x_cols].mean() - config.PITCH_Y / 2).abs().idxmax()[:-2]
+    away_gk = (period_tracking[away_x_cols].mean() - config.PITCH_X / 2).abs().idxmax()[:-2]
 
     home_gk_x = period_tracking[f"{home_gk}_x"].mean()
     away_gk_x = period_tracking[f"{away_gk}_x"].mean()
@@ -137,21 +137,6 @@ def label_frames_and_episodes(
     return tracking.reset_index(), events
 
 
-def label_phases(tracking: pd.DataFrame) -> pd.DataFrame:
-    phases = summarize_phases(tracking)
-
-    tracking = tracking.copy()
-    tracking["phase_id"] = 0
-
-    for i in phases.index:
-        start_frame = phases.at[i, "start_frame_id"]
-        end_frame = phases.at[i, "end_frame_id"]
-        phase_mask = tracking["frame_id"].between(start_frame, end_frame)
-        tracking.loc[phase_mask, "phase_id"] = i
-
-    return tracking
-
-
 def summarize_playing_times(tracking: pd.DataFrame) -> pd.DataFrame:
     if "frame_id" in tracking.columns:
         tracking = tracking.copy().set_index("frame_id")
@@ -167,8 +152,9 @@ def summarize_playing_times(tracking: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(play_records).T
 
 
-def summarize_phases(tracking: pd.DataFrame, keepers: List[str] = None) -> pd.DataFrame:
-    if "frame_id" in tracking:
+def label_phases(tracking: pd.DataFrame, keepers: List[str] = None) -> pd.DataFrame:
+    has_frame_as_col = "frame_id" in tracking.columns
+    if has_frame_as_col:
         tracking = tracking.copy().set_index("frame_id")
 
     keepers = [] if keepers is None else list(keepers)
@@ -192,8 +178,21 @@ def summarize_phases(tracking: pd.DataFrame, keepers: List[str] = None) -> pd.Da
         away_keepers = [p for p in keepers if p in active_players[1]]
         home_x_cols = [f"{p}_x" for p in active_players[0]]
         away_x_cols = [f"{p}_x" for p in active_players[1]]
-        home_keeper = home_keepers[0] if home_keepers else alive_tracking[home_x_cols].mean().idxmin()[:-2]
-        away_keeper = away_keepers[0] if away_keepers else alive_tracking[away_x_cols].mean().idxmax()[:-2]
+
+        # Determine which team is on the left by comparing mean x positions
+        home_mean_x = alive_tracking[home_x_cols].mean().mean()
+        away_mean_x = alive_tracking[away_x_cols].mean().mean()
+        home_is_left = home_mean_x < away_mean_x
+
+        if home_keepers and away_keepers:
+            home_keeper = home_keepers[0]
+            away_keeper = away_keepers[0]
+        elif home_is_left:
+            home_keeper = alive_tracking[home_x_cols].mean().idxmin()[:-2]
+            away_keeper = alive_tracking[away_x_cols].mean().idxmax()[:-2]
+        else:
+            home_keeper = alive_tracking[home_x_cols].mean().idxmax()[:-2]
+            away_keeper = alive_tracking[away_x_cols].mean().idxmin()[:-2]
 
         phase_dict = {
             "period_id": alive_tracking["period_id"].iloc[0],
@@ -208,10 +207,19 @@ def summarize_phases(tracking: pd.DataFrame, keepers: List[str] = None) -> pd.Da
     phases.index.name = "phase"
     phases.index += 1
 
-    return phases
+    # Update tracking phase_id to match the computed phases
+    tracking["phase_id"] = 0
+    for phase, row in phases.iterrows():
+        mask = tracking.index.to_series().between(row["start_frame_id"], row["end_frame_id"])
+        tracking.loc[mask, "phase_id"] = phase
+
+    if has_frame_as_col:
+        tracking = tracking.reset_index()
+
+    return tracking, phases
 
 
-def calculate_running_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
+def calculate_running_features(tracking: pd.DataFrame, fps=25, denoise: bool = True) -> pd.DataFrame:
     from scipy.signal import savgol_filter
 
     tracking = tracking.copy()
@@ -220,7 +228,7 @@ def calculate_running_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
         tracking = label_frames_and_episodes(tracking)
 
     if "phase_id" not in tracking.columns:
-        tracking = label_phases(tracking)
+        tracking, _ = label_phases(tracking)
 
     home_players = [c[:-2] for c in tracking.dropna(axis=1, how="all").columns if re.match(r"home_.*_x", c)]
     away_players = [c[:-2] for c in tracking.dropna(axis=1, how="all").columns if re.match(r"away_.*_x", c)]
@@ -235,6 +243,9 @@ def calculate_running_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
     if "player_id" in tracking.columns:
         state_cols.append("player_id")
 
+    speed_threshold = 12.0  # m/s, ~ human sprint limit
+    n_outliers_removed = 0
+
     for p in tqdm(objects, desc="Calculating running features per player"):
         new_cols = [f"{p}_{x}" for x in physical_features[2:]]
         new_features = pd.DataFrame(np.nan, index=tracking.index, columns=new_cols)
@@ -244,15 +255,40 @@ def calculate_running_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
         tracking = pd.concat([tracking, new_features], axis=1)
 
         for i in tracking["period_id"].unique():
-            x: pd.Series = tracking.loc[tracking["period_id"] == i, f"{p}_x"].dropna()
-            y: pd.Series = tracking.loc[tracking["period_id"] == i, f"{p}_y"].dropna()
+            period_mask = tracking["period_id"] == i
+            x: pd.Series = tracking.loc[period_mask, f"{p}_x"].dropna()
+            y: pd.Series = tracking.loc[period_mask, f"{p}_y"].dropna()
             if x.empty:
                 continue
 
-            vx = savgol_filter(np.diff(x.values) * fps, window_length=15, polyorder=2)
-            vy = savgol_filter(np.diff(y.values) * fps, window_length=15, polyorder=2)
-            ax = savgol_filter(np.diff(vx) * fps, window_length=9, polyorder=2)
-            ay = savgol_filter(np.diff(vy) * fps, window_length=9, polyorder=2)
+            if denoise:
+                # Detect outliers: frames where instantaneous speed exceeds threshold.
+                # Skip outlier filtering for the ball, which can legitimately exceed human speed.
+                dx = x.diff()
+                dy = y.diff()
+                inst_speed = np.sqrt(dx**2 + dy**2) * fps
+                outlier_idx = pd.Index([]) if p == "ball" else x.index[inst_speed > speed_threshold]
+                if len(outlier_idx) > 0:
+                    tracking.loc[outlier_idx, f"{p}_x"] = np.nan
+                    tracking.loc[outlier_idx, f"{p}_y"] = np.nan
+                    n_outliers_removed += len(outlier_idx)
+
+                    in_play_idx = x.index
+                    x = tracking.loc[in_play_idx, f"{p}_x"].interpolate(method="linear").bfill().ffill()
+                    y = tracking.loc[in_play_idx, f"{p}_y"].interpolate(method="linear").bfill().ffill()
+                    tracking.loc[in_play_idx, f"{p}_x"] = x
+                    tracking.loc[in_play_idx, f"{p}_y"] = y
+
+                vx = savgol_filter(np.diff(x.values) * fps, window_length=15, polyorder=2)
+                vy = savgol_filter(np.diff(y.values) * fps, window_length=15, polyorder=2)
+                ax = savgol_filter(np.diff(vx) * fps, window_length=9, polyorder=2)
+                ay = savgol_filter(np.diff(vy) * fps, window_length=9, polyorder=2)
+
+            else:
+                vx = np.diff(x.values) * fps
+                vy = np.diff(y.values) * fps
+                ax = np.diff(vx) * fps
+                ay = np.diff(vy) * fps
 
             tracking.loc[x.index[1:], f"{p}_vx"] = vx
             tracking.loc[x.index[1:], f"{p}_vy"] = vy
@@ -263,6 +299,9 @@ def calculate_running_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
             tracking.at[x.index[0], f"{p}_vy"] = tracking.at[x.index[1], f"{p}_vy"]
             tracking.at[x.index[0], f"{p}_speed"] = tracking.at[x.index[1], f"{p}_speed"]
             tracking.loc[[x.index[0], x.index[-1]], f"{p}_accel"] = 0
+
+    if denoise:
+        print(f"Removed {n_outliers_removed} outlier frames")
 
     return tracking[state_cols + feature_cols].copy()
 
