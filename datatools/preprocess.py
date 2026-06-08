@@ -370,7 +370,7 @@ if __name__ == "__main__":
 
     os.makedirs(OUT_EVENT_DIR, exist_ok=True)
     os.makedirs(OUT_TRACKING_DIR, exist_ok=True)
-    match_ids = [f.split(".")[0] for f in os.listdir(IN_EVENT_DIR)]
+    match_ids = [f.split(".")[0] for f in os.listdir(IN_EVENT_DIR) if f.endswith(".parquet")]
 
     for i, match_id in enumerate(match_ids):
         print()
