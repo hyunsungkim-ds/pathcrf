@@ -63,7 +63,7 @@ Example outputs:
 ![Team heatmaps](docs/heatmap_home.png)
 ![Player heatmaps](docs/heatmap_home_29.png)
   
-### Timeline of the home team's possession share (Fig. 4)
+### Possession share timeline (Fig. 4)
 ![Possession timeline](docs/home_poss.png)
 
 ### Pass networks (Fig. 5)
