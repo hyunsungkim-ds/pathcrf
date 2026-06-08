@@ -14,7 +14,7 @@
     "flip_pitch": true,
     "agent_model": "set_tf",
     "seq_model": "sab",
-    "crf_model": null,
+    "crf_model": "static_dense_crf",
     "att_heads": 4,
     "coarse_dim": 16,
     "fine_dim": 64,
@@ -26,14 +26,14 @@
     "team_loss": false,
     "macro_weight": 1.0,
     "rloss_weight": 0.0,
-    "crf_weight": 0.0,
+    "crf_weight": 1.0,
     "l1_weight": 0,
     "n_epochs": 50,
     "ce_epochs": 0,
     "batch_size": 32,
     "start_lr": 0.001,
     "min_lr": 1e-05,
-    "weight_decay": 0.0,
+    "weight_decay": 0.0001,
     "clip": null,
     "seed": 100,
     "num_workers": 4,
@@ -45,5 +45,5 @@
     "best_acc": null,
     "distributed": false,
     "world_size": 1,
-    "total_params": 3428902
+    "total_params": 3760678
 }

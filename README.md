@@ -30,7 +30,14 @@ python datatools/preprocess.py
 ```
 
 ## Model Training
-Run the `*.sh` files in `scripts` to train models (e.g., `bash scripts/ballradar_crf.sh`).
+For reproducibility, this repository already contains the trained models listed in Section 3.2 as follows:
+- Non-CRF: `saved/100`
+- Static Dense CRF: `saved/110`
+- Static Masked CRF: `saved/120`
+- Dynamic Dense CRF: `saved/130`
+- Dynamic Masked CRF: `saved/140`
+
+To train models on your own, run `*.sh` files in `scripts` (e.g., `bash scripts/ballradar_crf.sh`). Be sure to change `--trial` in the files to avoid overwriting.
 
 ## Model Inference and Evaluation
 Follow `tutorial.ipynb` step by step to reproduce inference and evaluation.
@@ -40,8 +47,10 @@ Example outputs:
 ![Event recall](docs/event_recall.png)
 
 ### Ground-truth and model-detected event sequences (Fig. 2)
-![GT events](docs/events_true.png)
-![Detected events](docs/events_140.png)
+<p align="left">
+  <img src="docs/events_true.png" width="100%" />
+  <img src="docs/events_140.png" width="98%" />
+</p>
 
 ## Practical Applications
 Following `tutorial.ipynb`, you can reproduce visualizations comparing the downstream analysis metrics derived from ground-truth and model-detected events.

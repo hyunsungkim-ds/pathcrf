@@ -14,7 +14,7 @@
     "flip_pitch": true,
     "agent_model": "set_tf",
     "seq_model": "sab",
-    "crf_model": "static_sparse_crf",
+    "crf_model": "dynamic_dense_crf",
     "att_heads": 4,
     "coarse_dim": 16,
     "fine_dim": 64,
@@ -45,5 +45,5 @@
     "best_acc": null,
     "distributed": false,
     "world_size": 1,
-    "total_params": 3442150
+    "total_params": 3431031
 }
