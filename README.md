@@ -20,11 +20,14 @@ For reference, we overlay the actual ball trajectory as a semi-transparent path,
 </p>
 
 ## Data Preparation and Preprocessing
-- Uses the [Sportec Open DFL Dataset (Bassek et al., 2025)](https://www.nature.com/articles/s41597-025-04505-y) and [kloppy](https://kloppy.pysport.org) package.
-- First, to download and synchronize the event and tracking data, follow `tutorial.ipynb` of [ELASTIC (Kim et al., 2025)](https://github.com/hyunsungkim-ds/elastic.git). This saves the synchronized event and tracking data files to the designated paths.
-- Place the synchronized event and tracking data files into `data/sportec/event_synced` and `data/sportec/tracking_parquet`, respectively.
-- Running `python datatools/preprocess.py` merges the event-based ground-truth possession states into tracking data and saves the result to `tracking_processed`, while the ground-truth event data is saved to `event_processed`.
+This repository uses the [Sportec Open DFL Dataset (Bassek et al., 2025)](https://www.nature.com/articles/s41597-025-04505-y) together with the [kloppy](https://kloppy.pysport.org) package. It consists of event and tracking data from seven matches of German Bundesliga's first and second divisions, and can be downloaded from [this link](https://springernature.figshare.com/articles/dataset/An_integrated_dataset_of_spatiotemporal_and_event_data_in_elite_soccer/28196177). After downloading the data, place the XML files by type in the following directories:
+- Match information: `data/sportec/metadata`
+- Event data: `data/sportec/event`
+- Tracking data: `data/sportec/tracking`
 
+Since the events are manually annotated and thus have imprecise timestamps, they are synchronized with the tracking data using [ELASTIC (Kim et al., 2025)](https://github.com/hyunsungkim-ds/elastic.git). For convenience, the synchronized event data is already provided in `data/sportec_synced`, so you do not need to run the synchronization yourself.
+
+Then, run the preprocessing script below, which produces the preprocessed event data in `data/sportec/event_processed` and the tracking data combined with per-frame ground-truth possession states in `data/sportec/tracking_processed`.
 ```bash
 python datatools/preprocess.py
 ```
