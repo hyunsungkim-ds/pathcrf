@@ -12,6 +12,7 @@ from rdp import rdp
 from tqdm import tqdm
 
 from datatools import config, utils
+from datatools.sportec_data import SportecData
 
 
 class Preprocessor:
@@ -363,8 +364,7 @@ class Preprocessor:
 
 
 if __name__ == "__main__":
-    IN_EVENT_DIR = "data/sportec/event_synced"
-    IN_TRACKING_DIR = "data/sportec/tracking_parquet"
+    IN_EVENT_DIR = "data/sportec_synced"
     OUT_EVENT_DIR = "data/sportec/event_processed"
     OUT_TRACKING_DIR = "data/sportec/tracking_processed"
 
@@ -377,7 +377,7 @@ if __name__ == "__main__":
         print(f"[{i + 1}] {match_id}")
 
         events = pd.read_parquet(f"{IN_EVENT_DIR}/{match_id}.parquet")
-        tracking = pd.read_parquet(f"{IN_TRACKING_DIR}/{match_id}.parquet")
+        tracking = SportecData(match_id, load_tracking=True).tracking.reset_index(drop=True)
         tracking[["timestamp", "ball_x", "ball_y"]] = tracking[["timestamp", "ball_x", "ball_y"]].round(2)
 
         proc = Preprocessor(events, tracking)

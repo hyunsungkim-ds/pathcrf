@@ -12,7 +12,7 @@ from datatools.match_data import MatchData
 
 META_DIR = "data/sportec/metadata"
 EVENT_DIR = "data/sportec/event"
-TRACKING_DIR = "data/sportec/tracking_parquet"
+TRACKING_DIR = "data/sportec/tracking"
 
 POSITION_MAPPING = {
     None: None,
@@ -59,9 +59,11 @@ class SportecData(MatchData):
         self.events = self.load_event_data(self.event_path)
         self.events = self.align_event_orientations(self.lineup, self.events)
 
-        if "parquet" in TRACKING_DIR:
-            tracking_files = [f for f in os.listdir(TRACKING_DIR) if match_id in f and f.endswith(".parquet")]
-            self.tracking_path = f"{TRACKING_DIR}/{tracking_files[0]}"
+        parquet_path = f"{TRACKING_DIR}_parquet/{match_id}.parquet"
+
+        # Use the cached parquet if available, otherwise read the raw XML
+        if os.path.exists(parquet_path):
+            self.tracking_path = parquet_path
             self.tracking = pd.read_parquet(self.tracking_path)
             self.fps = 25
 
